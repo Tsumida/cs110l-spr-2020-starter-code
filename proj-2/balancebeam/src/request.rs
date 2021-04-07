@@ -77,7 +77,9 @@ pub fn extend_header_value(
 fn parse_request(buffer: &[u8]) -> Result<Option<(http::Request<Vec<u8>>, usize)>, Error> {
     let mut headers = [httparse::EMPTY_HEADER; MAX_NUM_HEADERS];
     let mut req = httparse::Request::new(&mut headers);
-    let res = req.parse(buffer).or_else(|err| Err(Error::MalformedRequest(err)))?;
+    let res = req
+        .parse(buffer)
+        .or_else(|err| Err(Error::MalformedRequest(err)))?;
 
     if let httparse::Status::Complete(len) = res {
         let mut request = http::Request::builder()
@@ -147,7 +149,9 @@ fn read_body(
         // Read up to 512 bytes at a time. (If the client only sent a small body, then only allocate
         // space to read that body.)
         let mut buffer = vec![0_u8; min(512, content_length)];
-        let bytes_read = stream.read(&mut buffer).or_else(|err| Err(Error::ConnectionError(err)))?;
+        let bytes_read = stream
+            .read(&mut buffer)
+            .or_else(|err| Err(Error::ConnectionError(err)))?;
 
         // Make sure the client is still sending us bytes
         if bytes_read == 0 {
@@ -214,5 +218,10 @@ pub fn write_to_stream(
 }
 
 pub fn format_request_line(request: &http::Request<Vec<u8>>) -> String {
-    format!("{} {} {:?}", request.method(), request.uri(), request.version())
+    format!(
+        "{} {} {:?}",
+        request.method(),
+        request.uri(),
+        request.version()
+    )
 }
