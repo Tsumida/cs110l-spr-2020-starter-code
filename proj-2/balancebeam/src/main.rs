@@ -95,13 +95,13 @@ fn main() {
         max_requests_per_minute: options.max_requests_per_minute,
     });
 
-    // let pool = ThreadPool::new(8);
+    let pool = ThreadPool::new(16);
 
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
             // Handle the connection!
             let state = state.clone();
-            std::thread::spawn(move || handle_connection(stream, state));
+            pool.execute(move || handle_connection(stream, state));
         }
     }
 }
