@@ -3,7 +3,7 @@ mod response;
 
 use clap::Clap;
 use rand::{Rng, SeedableRng};
-use std::sync::Arc;
+use std::sync::{atomic::AtomicU64, Arc};
 use tokio::net::{TcpListener, TcpStream};
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
@@ -56,6 +56,9 @@ struct ProxyState {
     max_requests_per_minute: usize,
     /// Addresses of servers that we are proxying to
     upstream_addresses: Vec<String>,
+
+    // stats
+    open_conn_cnt: AtomicU64,
 }
 
 #[tokio::main]
@@ -91,6 +94,7 @@ async fn main() -> std::io::Result<()> {
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
+        open_conn_cnt: AtomicU64::new(0),
     });
 
     while let Ok((stream, _)) = listener.accept().await {
@@ -146,6 +150,10 @@ async fn handle_connection(mut client_conn: TcpStream, state: Arc<ProxyState>) {
             return;
         }
     };
+
+    state
+        .open_conn_cnt
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     // should be upstream_conn.peer_addr() ?
     // let upstream_ip = client_conn.peer_addr().unwrap().ip().to_string();

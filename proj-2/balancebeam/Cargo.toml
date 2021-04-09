@@ -24,3 +24,6 @@ nix = "0.17"
 hyper = "0.14"
 reqwest = "0.11"
 async-trait = "0.1"
+
+[profile.release]
+debug = true
