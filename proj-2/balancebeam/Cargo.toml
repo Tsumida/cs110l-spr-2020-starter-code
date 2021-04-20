@@ -18,6 +18,7 @@ rand = "0.7"
 parking_lot = "0.10"
 warp = "0.3"
 tokio = {version = "1.2", features=["full"]}
+thiserror = ""
 
 [dev-dependencies]
 nix = "0.17"

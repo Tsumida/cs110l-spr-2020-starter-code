@@ -3,12 +3,15 @@ mod response;
 
 use clap::Clap;
 use std::{
-    collections::{HashMap, VecDeque},
-    sync::{atomic::AtomicU64, Arc},
+    collections::VecDeque,
+    sync::{atomic::AtomicU8, Arc},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::Mutex,
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Mutex,
+    },
 };
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
@@ -45,6 +48,19 @@ struct CmdOptions {
     max_requests_per_minute: usize,
 }
 
+type UpStreamStatus = AtomicU8;
+const STATUS_HEATHLY: u8 = 0;
+const STATUS_UNAVAILABLE: u8 = 1;
+
+#[derive(Debug, thiserror::Error)]
+enum BBErr {
+    #[error("fail to reuse tcp connection {0}")]
+    ReuseConnectionErr(String),
+
+    #[error("fail to connection upstream {0}")]
+    BuildConnectionErr(String),
+}
+
 /// Contains information about the state of balancebeam (e.g. what servers we are currently proxying
 /// to, what servers have failed, rate limiting counts, etc.)
 ///
@@ -65,24 +81,40 @@ struct ProxyState {
     max_conn: usize,
 
     pool: VecDeque<TcpStream>,
+
+    conn_cnt: usize,
+
+    upstream_status: Arc<UpStreamStatus>,
 }
 
 impl ProxyState {
-    async fn get_avaliable_conn(&mut self) -> Result<Option<TcpStream>, std::io::Error> {
-        // drop som conn.
-        while self.pool.len() > self.max_conn {
-            self.pool.pop_front();
-        }
-
-        if self.pool.len() == 0 {
-            let s = connect_to_upstream(self).await?;
+    /// Return None if there are no idle connections for task and task should wait for a while or be attach to another UpStream.
+    /// Note: This method return error if and only if it can't build new connections.
+    async fn get_idle_conn(&mut self) -> Result<Option<TcpStream>, BBErr> {
+        if self.conn_cnt < self.max_conn {
+            let s = connect_to_upstream(self).await.map_err(|e| {
+                self.try_mark_unavailable();
+                e
+            })?;
             self.pool.push_back(s);
+            self.conn_cnt += 1;
         }
 
         Ok(self.pool.pop_front())
     }
 
-    fn close_conn() {}
+    /// Task use this function to destroy unavailable functions.
+    fn destory_conn(&mut self, _: TcpStream) {
+        self.conn_cnt -= 1;
+    }
+
+    fn try_mark_unavailable(&mut self) {
+        // Double check
+        if self.conn_cnt == 0 {
+            self.upstream_status
+                .store(STATUS_UNAVAILABLE, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 }
 
 #[tokio::main]
@@ -118,6 +150,9 @@ async fn main() -> std::io::Result<()> {
     let mut proxy_states = Vec::new();
 
     for upstream in options.upstream {
+        let upstream_status = Arc::new(AtomicU8::new(STATUS_HEATHLY));
+        upstreams.push((upstream_status.clone(), upstream.clone()));
+
         let state = Arc::new(Mutex::new(ProxyState {
             upstream_address: upstream.clone(),
             active_health_check_interval: options.active_health_check_interval,
@@ -128,29 +163,63 @@ async fn main() -> std::io::Result<()> {
 
             max_conn: 128,
             pool: VecDeque::with_capacity(128),
+            conn_cnt: 0,
+            upstream_status,
         }));
 
-        upstreams.push(upstream.clone());
         proxy_states.push(state);
     }
 
-    let mut index = 0usize;
-    while let Ok((stream, _)) = listener.accept().await {
-        // Handle the connection!
+    let task_q_size = 128usize;
+    let (task_sender, task_queue) = channel(task_q_size);
+    let task_sender_backup = task_sender.clone();
+    tokio::spawn(dispatcher(
+        upstreams,
+        proxy_states,
+        task_queue,
+        task_sender_backup,
+    ));
 
-        index = (index + 1) % upstreams.len();
-        let state = proxy_states.get(index).unwrap().clone();
-        tokio::spawn(handle_connection(stream, state));
+    while let Ok((stream, _)) = listener.accept().await {
+        task_sender.send(stream).await.expect("dispatcher died");
     }
 
     Ok(())
 }
 
-async fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
+/// Dispatcher owns ProxyState list.
+async fn dispatcher(
+    upstreams: Vec<(Arc<AtomicU8>, String)>,
+    proxy_states: Vec<Arc<Mutex<ProxyState>>>,
+    mut task_queue: Receiver<TcpStream>,
+    task_sender: Sender<TcpStream>,
+) {
+    let mut index = 0usize;
+
+    while let Some(stream) = task_queue.recv().await {
+        for _ in 0..upstreams.len() {
+            index = (index + 1) % upstreams.len();
+            if let Some((state, _)) = upstreams.get(index) {
+                if state.load(std::sync::atomic::Ordering::SeqCst) == STATUS_HEATHLY {
+                    break;
+                }
+            }
+        }
+
+        let redispatcher = task_sender.clone();
+        let state = proxy_states.get(index).unwrap().clone();
+        tokio::spawn(handle_connection(stream, state, redispatcher));
+    }
+}
+
+/// Return error if failed to connect upstream server.
+async fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, BBErr> {
     let upstream_ip = &state.upstream_address;
+
+    // Keep-alive ?
     TcpStream::connect(upstream_ip).await.or_else(|err| {
         log::error!("Failed to connect to upstream {}: {}", upstream_ip, err);
-        Err(err)
+        Err(BBErr::BuildConnectionErr(upstream_ip.clone()))
     })
     // TODO: implement failover (milestone 3)
 }
@@ -168,32 +237,49 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
     }
 }
 
-/// Handling incomming connection and open a TCP connection to upstream server randomly chosen.
-async fn handle_connection(mut client_conn: TcpStream, state: Arc<Mutex<ProxyState>>) {
+/// Handling incomming connection.
+/// This function try to return back the TcpStream for reusing or destory it while unavailable.
+async fn handle_connection(
+    mut client_conn: TcpStream,
+    state: Arc<Mutex<ProxyState>>,
+    redispatcher: Sender<TcpStream>,
+) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
     // Open a connection to a random destination server
-    let conn = state.lock().await.get_avaliable_conn().await;
+    let conn = state.lock().await.get_idle_conn().await;
 
     match conn {
         Ok(Some(mut upstream_conn)) => {
-            process_task(client_ip, &mut client_conn, &mut upstream_conn).await;
-            state.lock().await.pool.push_back(upstream_conn);
+            match process_task(client_ip, &mut client_conn, &mut upstream_conn).await {
+                // Return the connection back for re-using.
+                Ok(()) => state.lock().await.pool.push_back(upstream_conn),
+                Err(BBErr::ReuseConnectionErr(_)) => state.lock().await.destory_conn(upstream_conn),
+                _ => unreachable!(),
+            }
         }
-        _ => {
-            let response = response::make_http_error(http::StatusCode::BAD_GATEWAY);
-            send_response(&mut client_conn, &response).await;
+        Ok(None) => {
+            let _ = redispatcher.send(client_conn).await;
             return;
         }
+        Err(BBErr::BuildConnectionErr(_)) => {
+            // Error is throwed from `connect_to_upstream` and hints that upstream is unavailable.
+            let _ = redispatcher.send(client_conn).await;
+            state.lock().await.try_mark_unavailable();
+            return;
+        }
+        _ => unreachable!(),
     }
 }
 
+/// Relay requests from client to an upstream server.
+/// Return true if the connectin is available.
 async fn process_task(
     client_ip: String,
     client_conn: &mut TcpStream,
     upstream_conn: &mut TcpStream,
-) {
+) -> Result<(), BBErr> {
     loop {
         // Read a request from the client
         let upstream_ip = upstream_conn.peer_addr().unwrap().ip().to_string();
@@ -203,12 +289,12 @@ async fn process_task(
             // Handle case where client closed connection and is no longer sending requests
             Err(request::Error::IncompleteRequest(0)) => {
                 log::debug!("Client finished sending requests. Shutting down connection");
-                return;
+                return Ok(());
             }
             // Handle I/O error in reading from the client
             Err(request::Error::ConnectionError(io_err)) => {
                 log::info!("Error reading request from client stream: {}", io_err);
-                return;
+                return Ok(());
             }
             Err(error) => {
                 log::debug!("Error parsing request: {:?}", error);
@@ -245,7 +331,7 @@ async fn process_task(
             );
             let response = response::make_http_error(http::StatusCode::BAD_GATEWAY);
             send_response(client_conn, &response).await;
-            return;
+            return Err(BBErr::ReuseConnectionErr(upstream_ip.clone()));
         }
         log::debug!("Forwarded request to server");
 
@@ -256,7 +342,7 @@ async fn process_task(
                 log::error!("Error reading response from server: {:?}", error);
                 let response = response::make_http_error(http::StatusCode::BAD_GATEWAY);
                 send_response(client_conn, &response).await;
-                return;
+                return Err(BBErr::ReuseConnectionErr(upstream_ip.clone()));
             }
         };
         // Forward the response to the client
