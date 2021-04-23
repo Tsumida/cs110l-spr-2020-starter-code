@@ -86,8 +86,7 @@ impl BalanceBeam {
 
     #[allow(dead_code)]
     pub async fn get(&self, path: &str) -> Result<String, reqwest::Error> {
-        let client = reqwest::Client::new();
-        client
+        reqwest::Client::new()
             .get(&format!("http://{}{}", self.address, path))
             .header("x-sent-by", "balancebeam-tests")
             .send()

@@ -1,5 +1,6 @@
 //! Simulator for processing http query and io.
 
+use clap::Clap;
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -7,7 +8,6 @@ use std::{
     },
     time::Duration,
 };
-
 use warp::Filter;
 
 async fn query_hello(cnt: Arc<AtomicUsize>) -> Result<impl warp::Reply, warp::Rejection> {
@@ -24,8 +24,20 @@ async fn heavy_io(cnt: Arc<AtomicUsize>) -> Result<impl warp::Reply, warp::Rejec
     Ok(warp::reply::json(&num))
 }
 
+#[derive(Clap, Debug)]
+#[clap(about = "Server for testing")]
+struct ServerCLI {
+    #[clap(short, long, about = "port to bind to", default_value = "6666")]
+    port: u16,
+}
+
 #[tokio::main]
 async fn main() -> () {
+    let cmd = ServerCLI::parse();
+
+    let bind_ip = [127, 0, 0, 1];
+    let port = cmd.port;
+
     let io_cnt = Arc::new(AtomicUsize::new(0));
     let query_cnt = Arc::new(AtomicUsize::new(0));
 
@@ -45,9 +57,6 @@ async fn main() -> () {
         .and(shared_io_cnt.clone())
         .and(warp::path::end())
         .and_then(heavy_io);
-
-    let bind_ip = [127, 0, 0, 1];
-    let port = 6666;
 
     println!("listening at {:?}:{}", bind_ip, port);
 

@@ -56,6 +56,7 @@ impl ErrorServer {
                     }))
                 }
             });
+
             let server = hyper::Server::bind(&bind_addr)
                 .serve(service)
                 .with_graceful_shutdown(async {
@@ -82,10 +83,10 @@ impl Server for ErrorServer {
         // Tell the hyper server to stop
         let _ = self.shutdown_signal_sender.send(());
         // Wait for it to stop
+
         self.server_task
             .await
             .expect("ErrorServer server task panicked");
-
         self.state.requests_received.load(atomic::Ordering::SeqCst)
     }
 

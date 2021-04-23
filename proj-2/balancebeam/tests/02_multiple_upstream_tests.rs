@@ -82,6 +82,9 @@ async fn test_load_distribution() {
 
 async fn try_failover(balancebeam: &BalanceBeam, upstreams: &mut Vec<Box<dyn Server>>) {
     // Send some initial requests. Everything should work
+
+    //tokio::time::sleep(Duration::from_secs(2)).await;
+
     log::info!("Sending some initial requests. These should definitely work.");
     for i in 0..5 {
         let path = format!("/request-{}", i);
@@ -97,6 +100,7 @@ async fn try_failover(balancebeam: &BalanceBeam, upstreams: &mut Vec<Box<dyn Ser
     // Kill one of the upstreams
     log::info!("Killing one of the upstream servers");
     upstreams.pop().unwrap().stop().await;
+    log::info!("Killing one of the upstream servers. Killed");
 
     // Make sure requests continue to work
     for i in 0..6 {

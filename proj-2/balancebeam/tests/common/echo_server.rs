@@ -4,7 +4,7 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response};
 use rand::Rng;
 use std::sync::{atomic, Arc};
-use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 
 #[derive(Debug)]
 struct ServerState {
@@ -33,7 +33,8 @@ async fn echo(
 }
 
 pub struct EchoServer {
-    shutdown_signal_sender: oneshot::Sender<()>,
+    shutdown_signal_sender: mpsc::Sender<()>,
+    #[allow(dead_code)]
     server_task: tokio::task::JoinHandle<()>,
     pub address: String,
     state: Arc<ServerState>,
@@ -48,7 +49,7 @@ impl EchoServer {
     pub async fn new_at_address(bind_addr_string: String) -> EchoServer {
         let bind_addr = bind_addr_string.parse().unwrap();
         // Create a one-shot channel that can be used to tell the server to shut down
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
         // Start a separate server task
         let server_state = Arc::new(ServerState {
@@ -65,15 +66,20 @@ impl EchoServer {
                     }))
                 }
             });
+
             let server = hyper::Server::bind(&bind_addr)
                 .serve(service)
                 .with_graceful_shutdown(async {
-                    shutdown_rx.await.ok();
+                    shutdown_rx.recv().await;
                 });
             // Start serving and wait for the server to exit
-            if let Err(e) = server.await {
+
+            // Tsuko: Essentially important!
+            tokio::pin!(server);
+            if let Err(e) = (&mut server).await {
                 log::error!("Error in EchoServer: {}", e);
             }
+            log::info!("shutdown server");
         });
 
         EchoServer {
@@ -90,7 +96,10 @@ impl Server for EchoServer {
     async fn stop(self: Box<Self>) -> usize {
         // Tell the hyper server to stop
         let _ = self.shutdown_signal_sender.send(());
+        println!("--");
+
         // Wait for it to stop
+        // tsuko: this will block test.
         self.server_task
             .await
             .expect("ErrorServer server task panicked");
