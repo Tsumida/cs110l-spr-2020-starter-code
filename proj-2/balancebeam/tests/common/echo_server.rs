@@ -73,7 +73,6 @@ impl EchoServer {
                     shutdown_rx.recv().await;
                 });
             // Start serving and wait for the server to exit
-
             // Tsuko: Essentially important!
             tokio::pin!(server);
             if let Err(e) = (&mut server).await {
@@ -95,15 +94,14 @@ impl EchoServer {
 impl Server for EchoServer {
     async fn stop(self: Box<Self>) -> usize {
         // Tell the hyper server to stop
-        let _ = self.shutdown_signal_sender.send(());
-        println!("--");
-
+        println!("try to send signal");
+        self.shutdown_signal_sender.send(()).await.unwrap();
         // Wait for it to stop
         // tsuko: this will block test.
         self.server_task
             .await
             .expect("ErrorServer server task panicked");
-
+        println!("server down");
         self.state.requests_received.load(atomic::Ordering::SeqCst)
     }
 

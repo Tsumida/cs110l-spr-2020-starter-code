@@ -24,6 +24,10 @@ async fn heavy_io(cnt: Arc<AtomicUsize>) -> Result<impl warp::Reply, warp::Rejec
     Ok(warp::reply::json(&num))
 }
 
+async fn health() -> Result<impl warp::Reply, warp::Rejection> {
+    Ok(warp::reply::json(&"health"))
+}
+
 #[derive(Clap, Debug)]
 #[clap(about = "Server for testing")]
 struct ServerCLI {
@@ -46,6 +50,8 @@ async fn main() -> () {
     let io_cnt_copy = io_cnt.clone();
     let shared_io_cnt = warp::any().map(move || io_cnt_copy.clone());
 
+    let health = warp::get().and(warp::path("health")).and_then(health);
+
     let hello = warp::get()
         .and(warp::path("hello"))
         .and(shared_query_cnt.clone())
@@ -60,5 +66,7 @@ async fn main() -> () {
 
     println!("listening at {:?}:{}", bind_ip, port);
 
-    warp::serve(hello.or(io_task)).run((bind_ip, port)).await;
+    warp::serve(hello.or(io_task).or(health))
+        .run((bind_ip, port))
+        .await;
 }

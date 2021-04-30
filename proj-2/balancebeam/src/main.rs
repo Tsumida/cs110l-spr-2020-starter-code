@@ -49,7 +49,6 @@ struct CmdOptions {
         default_value = "0"
     )]
     max_requests_per_minute: usize,
-
     #[clap(
         long,
         about = "Maximum number of connection per upstream(default = 1)",
@@ -63,7 +62,7 @@ const STATUS_HEALTHY: u8 = 0;
 const STATUS_UNAVAILABLE: u8 = 1;
 const STATUS_ACTIVATING: u8 = 2; // middle state in case of concurrent re-activating
 
-const DEFAULT_MAX_CONN: usize = 2;
+const DEFAULT_MAX_CONN: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 enum BBErr {
@@ -89,11 +88,12 @@ enum BBErr {
 ///                  <-------- activating ---------
 ///          build new conn      ↑  ↓
 ///                              <---
-///                        reactive (by reactivation)
+///                        reactivate (by reactivation)
 ///                     
 ///
 struct ProxyState {
     /// How frequently we check whether upstream servers are alive (Milestone 4)
+    // Seconds
     #[allow(dead_code)]
     active_health_check_interval: usize,
     /// Where we should send requests when doing active health checks (Milestone 4)
@@ -286,8 +286,6 @@ async fn schedule(
     let mut unavailable_cnt = 0;
 
     // First-fit scheduler.
-    //
-    //
     for _ in 0..upstreams.len() {
         cur_index = (cur_index + 1) % upstreams.len();
         if let Some((state, _)) = upstreams.get(cur_index) {
@@ -335,37 +333,46 @@ async fn reactivator(mut ps_recv: Receiver<Arc<Mutex<ProxyState>>>) {
         } else {
             String::default()
         };
+
+        let active_health_check_interval = psu.active_health_check_interval;
+        let active_health_check_path = psu.active_health_check_path.clone();
+
         drop(psu);
 
         if flag {
-            tokio::spawn(try_activate_ups(addr, ps));
+            tokio::spawn(try_activate_ups(
+                addr,
+                ps,
+                active_health_check_path,
+                active_health_check_interval,
+            ));
         }
     }
 }
 
 /// Keep building Tcp connection.
-async fn try_activate_ups(addr: String, ps: Arc<Mutex<ProxyState>>) {
-    log::info!("reactivating ups {}", &addr);
-    let base_interval: u64 = 2_000;
-    let mut cur_int = 1_000;
-    let conn;
+async fn try_activate_ups(
+    addr: String,
+    ps: Arc<Mutex<ProxyState>>,
+    active_health_check_url: String,
+    active_health_check_interval: usize,
+) {
+    let client = reqwest::Client::new();
     loop {
-        match TcpStream::connect(&addr).await {
-            Ok(c) => {
-                conn = c;
+        log::info!("try reactivating {}", &addr);
+        if let Ok(resp) = client
+            .get(&format!("http://{}{}", addr, active_health_check_url))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
                 break;
             }
-            Err(_) => {
-                cur_int = 20_000.min(cur_int << 1);
-                log::debug!("failed to connect ups {}, sleep {} ms", &addr, cur_int);
-                tokio::time::sleep(Duration::from_millis(base_interval + cur_int)).await;
-            }
         }
+        tokio::time::sleep(Duration::from_secs(active_health_check_interval as u64)).await;
     }
 
-    let mut psu = ps.lock().await;
-    psu.pool.push_back(conn);
-    psu.conn_cnt += 1;
+    let psu = ps.lock().await;
     if psu
         .upstream_status
         .compare_exchange(
@@ -386,7 +393,6 @@ async fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, BBErr> {
     let upstream_ip = &state.upstream_address;
 
     log::debug!("try to build connection to ups {}", &upstream_ip);
-    // Keep-alive ?
     TcpStream::connect(upstream_ip).await.or_else(|err| {
         log::error!("Failed to connect to upstream {}: {}", upstream_ip, err);
         Err(BBErr::BuildConnectionErr(upstream_ip.clone()))
