@@ -67,17 +67,28 @@ impl EchoServer {
                 }
             });
 
-            let server = hyper::Server::bind(&bind_addr)
-                .serve(service)
-                .with_graceful_shutdown(async {
-                    shutdown_rx.recv().await;
-                });
+            let server = hyper::Server::bind(&bind_addr).serve(service);
+            /*
+            .with_graceful_shutdown(async {
+                shutdown_rx.recv().await;
+            });*/
             // Start serving and wait for the server to exit
             // Tsuko: Essentially important!
             tokio::pin!(server);
+            println!("pinned!");
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+
+                },
+                _ = (&mut server) => {
+
+                }
+            }
+            /*
+
             if let Err(e) = (&mut server).await {
                 log::error!("Error in EchoServer: {}", e);
-            }
+            }*/
             log::info!("shutdown server");
         });
 
@@ -94,7 +105,6 @@ impl EchoServer {
 impl Server for EchoServer {
     async fn stop(self: Box<Self>) -> usize {
         // Tell the hyper server to stop
-        println!("try to send signal");
         self.shutdown_signal_sender.send(()).await.unwrap();
         // Wait for it to stop
         // tsuko: this will block test.
