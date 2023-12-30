@@ -38,6 +38,9 @@ impl Debugger {
                         // TODO (milestone 1): make the inferior run
                         // You may use self.inferior.as_mut().unwrap() to get a mutable reference
                         // to the Inferior object
+                        if let Some(inferior_ref) = self.inferior.as_mut(){
+                            println!("running(pid={})", inferior_ref.pid());
+                        }
                     } else {
                         println!("Error starting subprocess");
                     }
