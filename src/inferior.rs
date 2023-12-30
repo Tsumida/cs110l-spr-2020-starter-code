@@ -8,6 +8,8 @@ use std::process::Command;
 
 #[derive(Debug)]
 pub enum Status {
+    Init, 
+
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
     /// current instruction pointer that it is stopped at.
     Stopped(signal::Signal, usize),

@@ -1,5 +1,6 @@
 use crate::debugger_command::DebuggerCommand;
 use crate::inferior::{Inferior, Status};
+use nix::sys::signal::Signal;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -38,21 +39,14 @@ impl Debugger {
                         // TODO (milestone 1): make the inferior run
                         // You may use self.inferior.as_mut().unwrap() to get a mutable reference
                         // to the Inferior object
-                        if let Some(inferior_ref) = self.inferior.as_mut(){
-                            println!("running(pid={})", inferior_ref.pid()); 
-                            match inferior_ref.cont(){
-                                Ok(Status::Exited(code)) => {
-                                    println!("Child process exited ({})", code);
-                                }, 
-                                other => {
-                                    println!("expected process exited, got {:?}", other)
-                                }
-                            }
-                        }
+                        self.continue_process();
                     } else {
                         println!("Error starting subprocess");
                     }
                 }
+                DebuggerCommand::Cont => {
+                    self.continue_process()
+                },
                 DebuggerCommand::Quit => {
                     return;
                 }
@@ -97,6 +91,39 @@ impl Debugger {
                         println!("Unrecognized command.");
                     }
                 }
+            }
+        }
+    }
+
+    fn process_stopped(&mut self, sig: Signal, pc: usize) {
+        println!("Child stopped (SIG={}, pc={})", sig.to_string(), pc);
+    }
+
+    fn process_exit(&mut self, exit_code: i32) {
+        println!("Child process exited ({})", exit_code)
+    }
+
+    fn process_unexpected_result(&mut self, r: Result<Status, nix::Error>) {
+        println!("Unexpected result ({:?})", r)
+    }
+
+    fn continue_process(&mut self) {
+        match self.inferior.as_mut(){
+            Some(inf) => {
+                match inf.cont(){
+                    Ok(Status::Stopped(sig, pc)) => {
+                        self.process_stopped(sig, pc)
+                    }, 
+                    Ok(Status::Exited(code)) => {
+                        self.process_exit(code);
+                    },
+                    other => {
+                        self.process_unexpected_result(other);
+                    }
+                }
+            }, 
+            None => {
+                println!("invalid command, no existing process");
             }
         }
     }
