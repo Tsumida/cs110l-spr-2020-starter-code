@@ -2,6 +2,7 @@ use nix::sys::ptrace;
 use nix::sys::signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
@@ -20,6 +21,8 @@ pub enum Status {
     /// Indicates the inferior exited due to a signal. Contains the signal that killed the
     /// process.
     Signaled(signal::Signal),
+
+    Killed,
 }
 
 /// This function calls ptrace with PTRACE_TRACEME to enable debugging on a process. You should use
@@ -92,5 +95,9 @@ impl Inferior {
     pub fn cont(&mut self) -> Result<Status, nix::Error>{
         let _ = ptrace::cont(self.pid(), None)?;
         self.wait(None)
+    }
+
+    pub fn kill(&mut self) -> Result<Status, io::Error>{
+        self.child.kill().map(|_| { return Status::Killed })
     }
 }
