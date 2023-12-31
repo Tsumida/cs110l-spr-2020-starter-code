@@ -46,7 +46,7 @@ impl Debugger {
                 }
                 DebuggerCommand::Cont => {
                     self.continue_process();
-                },
+                }
                 DebuggerCommand::Quit => {
                     self.process_quit();
                     return;
@@ -110,40 +110,39 @@ impl Debugger {
     }
 
     fn continue_process(&mut self) {
-        match self.inferior.as_mut(){
-            Some(inf) => {
-                match inf.cont(){
-                    Ok(Status::Stopped(sig, pc)) => {
-                        self.process_stopped(sig, pc)
-                    }, 
-                    Ok(Status::Exited(code)) => {
-                        self.process_exit(code);
-                    },
-                    other => {
-                        self.process_unexpected_result(other);
-                    }
+        match self.inferior.as_mut() {
+            Some(inf) => match inf.cont() {
+                Ok(Status::Stopped(sig, pc)) => self.process_stopped(sig, pc),
+                Ok(Status::Exited(code)) => {
+                    self.process_exit(code);
                 }
-            }, 
+                other => {
+                    self.process_unexpected_result(other);
+                }
+            },
             None => {
                 println!("invalid command, no existing process");
             }
         }
     }
 
-    fn process_quit(&mut self){
-        if let Some(inf) = self.inferior.as_mut(){
-            match inf.kill(){
-                Ok(Status::Killed) => {
-                    println!("Child process killed");
-                }, 
-                Ok(s) => {
-                    println!("Unexpected status returned {:?}", s);
-                }, 
-                Err(e) => {
-                    println!("Failed to kill child process, got {:?}", e);
+    fn process_quit(&mut self) {
+        match self.inferior.as_mut() {
+            Some(inf) => {
+                match inf.kill() {
+                    Ok(Status::Killed) => {
+                        println!("Child process killed");
+                    }
+                    Ok(s) => {
+                        println!("Unexpected status returned {:?}", s);
+                    }
+                    Err(e) => {
+                        println!("Failed to kill child process, got {:?}", e);
+                    }
                 }
+                self.inferior = None;
             }
-            self.inferior = None;
+            None => {}
         }
     }
 }

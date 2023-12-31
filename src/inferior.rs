@@ -9,8 +9,7 @@ use std::process::Command;
 
 #[derive(Debug)]
 pub enum Status {
-    Init, 
-
+    // Init,
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
     /// current instruction pointer that it is stopped at.
     Stopped(signal::Signal, usize),
@@ -47,29 +46,25 @@ impl Inferior {
         cmd.args(args);
 
         unsafe {
-            cmd.pre_exec(|| {
-                child_traceme()
-            });
+            cmd.pre_exec(|| child_traceme());
         }
 
-        match cmd.spawn(){
+        match cmd.spawn() {
             Ok(child) => {
-                let inf = Inferior{child};
-                // Check status. 
-                match inf.wait(None){
-                    Ok(Status::Stopped(signal::Signal::SIGTRAP, _ )) => {
-                        Some(inf)
-                    }, 
+                let inf = Inferior { child };
+                // Check status.
+                match inf.wait(None) {
+                    Ok(Status::Stopped(signal::Signal::SIGTRAP, _)) => Some(inf),
                     other => {
                         println!("expected process stopped, got {:?}", other);
                         None
                     }
                 }
-            }, 
+            }
             Err(e) => {
                 println!("failed to run process, got err:{}", e);
                 None
-            },
+            }
         }
     }
 
@@ -92,12 +87,12 @@ impl Inferior {
         })
     }
 
-    pub fn cont(&mut self) -> Result<Status, nix::Error>{
+    pub fn cont(&mut self) -> Result<Status, nix::Error> {
         let _ = ptrace::cont(self.pid(), None)?;
         self.wait(None)
     }
 
-    pub fn kill(&mut self) -> Result<Status, io::Error>{
-        self.child.kill().map(|_| { return Status::Killed })
+    pub fn kill(&mut self) -> Result<Status, io::Error> {
+        self.child.kill().map(|_| return Status::Killed)
     }
 }
