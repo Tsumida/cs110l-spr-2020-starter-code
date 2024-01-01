@@ -1,14 +1,25 @@
 use crate::debugger_command::DebuggerCommand;
-use crate::inferior::{Inferior, Status};
+use crate::dwarf_data::{DwarfData, Error as DwarfError};
+use crate::inferior::{Inferior, RegisterValue, Status};
+use gimli::DebugInfo;
+use nix::sys::ptrace::{self, AddressType};
 use nix::sys::signal::Signal;
+use nix::unistd::Pid;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
+
+pub struct DebugDataWrapper {
+    debug_data: DwarfData,
+    pid: Pid,
+    reg: RegisterValue,
+}
 
 pub struct Debugger {
     target: String,
     history_path: String,
     readline: Editor<()>,
     inferior: Option<Inferior>,
+    debug_data: Option<DebugDataWrapper>,
 }
 
 impl Debugger {
@@ -26,6 +37,7 @@ impl Debugger {
             history_path,
             readline,
             inferior: None,
+            debug_data: None,
         }
     }
 
@@ -46,6 +58,9 @@ impl Debugger {
                 }
                 DebuggerCommand::Cont => {
                     self.continue_process();
+                }
+                DebuggerCommand::Backtrace => {
+                    self.process_backtrace();
                 }
                 DebuggerCommand::Quit => {
                     self.process_quit();
@@ -97,7 +112,7 @@ impl Debugger {
     }
 
     fn process_stopped(&mut self, sig: Signal, pc: usize) {
-        println!("Child stopped (SIG={}, pc={})", sig.to_string(), pc);
+        println!("Child stopped (SIG={}, pc={:#x})", sig.to_string(), pc);
     }
 
     fn process_exit(&mut self, exit_code: i32) {
@@ -121,9 +136,13 @@ impl Debugger {
                 }
             },
             None => {
-                println!("invalid command, no existing process");
+                self.process_no_inferior();
             }
         }
+    }
+
+    fn process_no_inferior(&self) {
+        println!("invalid command, no existing process");
     }
 
     fn process_quit(&mut self) {
@@ -144,5 +163,100 @@ impl Debugger {
             }
             None => {}
         }
+    }
+
+    fn process_backtrace(&mut self) {
+        match self.inferior.as_mut() {
+            Some(inf) => match inf.print_backtrace() {
+                Ok(reg) => {
+                    if let None = self.debug_data {
+                        let target = &self.target;
+                        let debug_data = match DwarfData::from_file(target) {
+                            Ok(val) => val,
+                            Err(DwarfError::ErrorOpeningFile) => {
+                                println!("Could not open file {}", target);
+                                std::process::exit(1);
+                            }
+                            Err(DwarfError::DwarfFormatError(err)) => {
+                                println!(
+                                    "Could not load debugging symbols from {}: {:?}",
+                                    target, err
+                                );
+                                std::process::exit(1);
+                            }
+                        };
+
+                        let pid = inf.pid();
+                        self.debug_data = Some(DebugDataWrapper {
+                            debug_data,
+                            pid,
+                            reg,
+                        });
+                    }
+
+                    if let Some(w) = self.debug_data.as_ref() {
+                        let reg = ptrace::getregs(w.pid).unwrap();
+                        let mut rip = reg.rip;
+                        let mut rbp = reg.rbp;
+                        let mut stack_info: Vec<String> = Vec::with_capacity(64);
+
+                        loop {
+                            // get func name
+                            // get source name
+                            let (s, func_name) = Debugger::get_current_stack_info(w, rip as usize);
+                            stack_info.push(s);
+                            if func_name == "main" {
+                                break;
+                            }
+
+                            rip = Debugger::read_from_addr(w.pid, (rbp + 8) as ptrace::AddressType)
+                                as u64;
+                            rbp =
+                                Debugger::read_from_addr(w.pid, rbp as ptrace::AddressType) as u64;
+                        }
+
+                        if stack_info.len() > 0 {
+                            for row in stack_info {
+                                println!("{}", row);
+                            }
+                        }
+                    }
+                }
+                other => {
+                    println!("Unexpected rip value {:?}", other);
+                }
+            },
+            None => self.process_no_inferior(),
+        }
+    }
+
+    fn get_current_stack_info(w: &DebugDataWrapper, rip: usize) -> (String, String) {
+        let source_info = match w.debug_data.get_line_from_addr(rip) {
+            Some(line) => line,
+            None => {
+                println!("invalid $rip value, source code not found");
+                std::process::exit(-1);
+            }
+        };
+
+        let func_name = match w.debug_data.get_function_from_addr(rip) {
+            Some(name) => name,
+            None => {
+                println!("invalid $rip value, function name not found");
+                std::process::exit(-1);
+            }
+        };
+
+        (
+            format!(
+                "{} ({}:{})",
+                func_name, source_info.file, source_info.number
+            ),
+            func_name,
+        )
+    }
+
+    fn read_from_addr(pid: Pid, addr: AddressType) -> usize {
+        ptrace::read(pid, addr).unwrap() as usize
     }
 }

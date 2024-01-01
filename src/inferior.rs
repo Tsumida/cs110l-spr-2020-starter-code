@@ -95,4 +95,21 @@ impl Inferior {
     pub fn kill(&mut self) -> Result<Status, io::Error> {
         self.child.kill().map(|_| return Status::Killed)
     }
+
+    pub fn print_backtrace(&mut self) -> Result<RegisterValue, nix::Error> {
+        let reg_val = ptrace::getregs(self.pid())?;
+        Ok(RegisterValue {
+            rip: reg_val.rip as usize,
+            rsp: reg_val.rsp as usize,
+            rbp: reg_val.rbp as usize,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RegisterValue {
+    pub rip: usize,
+    // rbp: usize,
+    pub rsp: usize,
+    pub rbp: usize,
 }
