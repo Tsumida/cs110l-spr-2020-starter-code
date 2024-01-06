@@ -38,9 +38,11 @@ fn child_traceme() -> Result<(), std::io::Error> {
 
 pub type Breakpoint = usize;
 
+const INS_INTERRUPT: u8 = 0xcc;
+
 pub struct Inferior {
     child: Child,
-    bks: HashMap<Breakpoint, Option<u8>>,
+    bks: HashMap<Breakpoint, u8>,
 }
 
 impl Inferior {
@@ -98,28 +100,57 @@ impl Inferior {
     }
 
     pub fn cont(&mut self) -> Result<Status, nix::Error> {
-        let _ = ptrace::cont(self.pid(), None)?;
-        self.wait(None)
+        let pid = self.pid();
+        let mut reg = ptrace::getregs(pid).unwrap();
+        let rip = reg.rip as usize;
+        let prev_rip = Inferior::get_prev_rip(rip);
+        if self.bks.get(&prev_rip).is_none() {
+            // stop by ctrl+c or elsec
+            let _ = ptrace::cont(pid, None)?;
+            return self.wait(None);
+        }
+
+        let ins = self.bks.get(&prev_rip).unwrap().clone();
+
+        // rewrite ins at %rip - 1
+        let data = helper::write_byte(pid, prev_rip as u64, ins)?;
+        assert!(data == INS_INTERRUPT);
+
+        // rewind rip
+        reg.rip = prev_rip as u64;
+        _ = ptrace::setregs(pid, reg)?;
+
+        // continue
+        let _ = ptrace::cont(pid, None)?;
+        let res = self.wait(None)?;
+
+        // rewrite rip with INS_INTERRUPT
+        _ = self.add_breakpoint(prev_rip)?;
+
+        // Note that %rip in res advanced.
+        Ok(res)
     }
 
     pub fn kill(&mut self) -> Result<Status, io::Error> {
         self.child.kill().map(|_| return Status::Killed)
     }
 
+    // Note: restore original instruction before invoking this method.
+    // Bug: call break 0xAAA twice and then be trucked into infinite loops.
     pub fn add_breakpoint(&mut self, rip: usize) -> Result<(), nix::Error> {
-        if let Some(_) = self.bks.get(&rip) {
-            return Ok(());
-        }
+        let ins: u8 = helper::write_byte(self.pid(), rip as u64, INS_INTERRUPT)?;
+        self.bks.insert(rip, ins);
 
-        let interrupt: u8 = 0xcc;
-        let instruction: u8 = helper::write_byte(self.pid(), rip as u64, interrupt)?;
-        self.bks.insert(rip, Some(instruction));
+        for (k, v) in self.bks.iter() {
+            println!("inferior breakpoint {:#x} = {:#x}", k, v);
+        }
 
         Ok(())
     }
 
-    pub fn continue_from_breakpoint(&mut self, current_rip: usize) -> Result<(), nix::Error> {
-        unimplemented!()
+    pub fn get_prev_rip(rip: usize) -> usize {
+        // The process is interrupted and %rip advanced.
+        return rip - 1;
     }
 }
 

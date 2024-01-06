@@ -54,7 +54,11 @@ impl Debugger {
 
                         match inf.wait(None) {
                             Ok(Status::Stopped(sig, rip)) => {
-                                self.process_stopped(sig, rip, self.is_stopped_by_bk(rip));
+                                self.process_stopped(
+                                    sig,
+                                    rip,
+                                    self.is_stopped_by_bk(Inferior::get_prev_rip(rip)),
+                                );
                             }
                             other => {
                                 println!("Unexpected result {:?}", other);
@@ -124,16 +128,17 @@ impl Debugger {
 
     fn process_stopped(&mut self, sig: Signal, rip: usize, print_backtrace: bool) {
         println!(
-            "Child stopped (signal {}, rip = {:#x})",
+            "Child stopped (signal {}, rip = {:#x}, pb = {})",
             sig.to_string(),
-            rip
+            rip,
+            print_backtrace,
         );
 
         let pid = self.inferior.as_ref().unwrap().pid();
         let d = Debugger::new_debug_wrapper(&self.target, pid).unwrap();
 
         if print_backtrace {
-            match d.debug_data.get_line_from_addr(rip) {
+            match d.debug_data.get_line_from_addr(Inferior::get_prev_rip(rip)) {
                 Some(line) => {
                     println!("Stopped at {}:{}", line.file, line.number);
                 }
@@ -153,15 +158,18 @@ impl Debugger {
     }
 
     fn process_unexpected_result(&mut self, r: Result<Status, nix::Error>) {
-        println!("Unexpected result ({:?})", r)
+        println!("Unexpected result ({:?})", r);
+        std::process::exit(-1);
     }
 
     fn continue_process(&mut self) {
         match self.inferior.as_mut() {
             Some(inf) => match inf.cont() {
-                Ok(Status::Stopped(sig, pc)) => {
-                    self.process_stopped(sig, pc, self.is_stopped_by_bk(pc))
-                }
+                Ok(Status::Stopped(sig, rip)) => self.process_stopped(
+                    sig,
+                    rip,
+                    self.is_stopped_by_bk(Inferior::get_prev_rip(rip)),
+                ),
                 Ok(Status::Exited(code)) => {
                     self.process_exit(code);
                 }
@@ -290,26 +298,17 @@ impl Debugger {
     }
 
     fn process_add_break(&mut self, bk: usize) {
-        match self.inferior.as_mut() {
-            None => {
-                // Before inferior running
-                self.bks.push(bk as usize);
-            }
-            Some(inf) => {
-                if let Err(err) = inf.add_breakpoint(bk) {
-                    println!("Add breakpoint {}, got {:?}", bk, err);
-                }
+        self.bks.push(bk as usize);
+        if let Some(inf) = self.inferior.as_mut() {
+            if let Err(err) = inf.add_breakpoint(bk) {
+                println!("Add breakpoint {}, got {:?}", bk, err);
             }
         }
         println!("Set breakpoint {} at {}", self.bks.len(), bk);
     }
 
-    fn get_prev_rip(rip: usize) -> usize {
-        // The process is interrupted and %rip advanced.
-        return rip - 1;
-    }
-
-    fn is_stopped_by_bk(&self, rip: usize) -> bool {
-        self.bks.get(Debugger::get_prev_rip(rip)).is_some()
+    fn is_stopped_by_bk(&self, prev_rip: usize) -> bool {
+        println!("{:#x}, {} {:?}", prev_rip, self.bks.len(), self.bks);
+        self.bks.get(prev_rip).is_some()
     }
 }
