@@ -2,10 +2,13 @@ use nix::sys::ptrace;
 use nix::sys::signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use std::collections::HashMap;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
+
+use crate::helper;
 
 #[derive(Debug)]
 pub enum Status {
@@ -33,14 +36,17 @@ fn child_traceme() -> Result<(), std::io::Error> {
     )))
 }
 
+pub type Breakpoint = usize;
+
 pub struct Inferior {
     child: Child,
+    bks: HashMap<Breakpoint, Option<u8>>,
 }
 
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
-    pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
+    pub fn new(target: &str, args: &Vec<String>, bks: Vec<Breakpoint>) -> Option<Inferior> {
         println!("target={:?}, args={:?}", target, args);
         let mut cmd = Command::new(target);
         cmd.args(args);
@@ -51,15 +57,19 @@ impl Inferior {
 
         match cmd.spawn() {
             Ok(child) => {
-                let inf = Inferior { child };
-                // Check status.
-                match inf.wait(None) {
-                    Ok(Status::Stopped(signal::Signal::SIGTRAP, _)) => Some(inf),
-                    other => {
-                        println!("expected process stopped, got {:?}", other);
-                        None
+                let mut inf = Inferior {
+                    child,
+                    bks: HashMap::with_capacity(bks.len()),
+                };
+
+                for bk in bks {
+                    if let Err(err) = inf.add_breakpoint(bk) {
+                        println!("add bk in {}, got {:?}", bk, err);
+                        std::process::exit(-1);
                     }
+                    println!("add bk in {}", bk);
                 }
+                Some(inf)
             }
             Err(e) => {
                 println!("failed to run process, got err:{}", e);
@@ -96,13 +106,20 @@ impl Inferior {
         self.child.kill().map(|_| return Status::Killed)
     }
 
-    pub fn print_backtrace(&mut self) -> Result<RegisterValue, nix::Error> {
-        let reg_val = ptrace::getregs(self.pid())?;
-        Ok(RegisterValue {
-            rip: reg_val.rip as usize,
-            rsp: reg_val.rsp as usize,
-            rbp: reg_val.rbp as usize,
-        })
+    pub fn add_breakpoint(&mut self, rip: usize) -> Result<(), nix::Error> {
+        if let Some(_) = self.bks.get(&rip) {
+            return Ok(());
+        }
+
+        let interrupt: u8 = 0xcc;
+        let instruction: u8 = helper::write_byte(self.pid(), rip as u64, interrupt)?;
+        self.bks.insert(rip, Some(instruction));
+
+        Ok(())
+    }
+
+    pub fn continue_from_breakpoint(&mut self, current_rip: usize) -> Result<(), nix::Error> {
+        unimplemented!()
     }
 }
 

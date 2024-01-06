@@ -1,7 +1,6 @@
 use crate::debugger_command::DebuggerCommand;
 use crate::dwarf_data::{DwarfData, Error as DwarfError};
-use crate::inferior::{Inferior, RegisterValue, Status};
-use gimli::DebugInfo;
+use crate::inferior::{Breakpoint, Inferior, RegisterValue, Status};
 use nix::sys::ptrace::{self, AddressType};
 use nix::sys::signal::Signal;
 use nix::unistd::Pid;
@@ -20,6 +19,7 @@ pub struct Debugger {
     readline: Editor<()>,
     inferior: Option<Inferior>,
     debug_data: Option<DebugDataWrapper>,
+    bks: Vec<Breakpoint>,
 }
 
 impl Debugger {
@@ -38,6 +38,7 @@ impl Debugger {
             readline,
             inferior: None,
             debug_data: None,
+            bks: vec![],
         }
     }
 
@@ -45,16 +46,26 @@ impl Debugger {
         loop {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
-                    if let Some(inferior) = Inferior::new(&self.target, &args) {
-                        // Create the inferior
-                        self.inferior = Some(inferior);
-                        // TODO (milestone 1): make the inferior run
-                        // You may use self.inferior.as_mut().unwrap() to get a mutable reference
-                        // to the Inferior object
-                        self.continue_process();
+                    self.inferior = Inferior::new(&self.target, &args, self.bks.clone());
+                    if let Some(inf) = self.inferior.as_mut() {
+                        let d = Debugger::new_debug_wrapper(&&self.target, inf.pid()).unwrap();
+                        d.debug_data.print();
+                        self.debug_data = Some(d);
+
+                        match inf.wait(None) {
+                            Ok(Status::Stopped(sig, rip)) => {
+                                self.process_stopped(sig, rip, self.is_stopped_by_bk(rip));
+                            }
+                            other => {
+                                println!("Unexpected result {:?}", other);
+                            }
+                        }
                     } else {
                         println!("Error starting subprocess");
                     }
+                }
+                DebuggerCommand::Break(bk) => {
+                    self.process_add_break(bk as usize);
                 }
                 DebuggerCommand::Cont => {
                     self.continue_process();
@@ -111,8 +122,29 @@ impl Debugger {
         }
     }
 
-    fn process_stopped(&mut self, sig: Signal, pc: usize) {
-        println!("Child stopped (SIG={}, pc={:#x})", sig.to_string(), pc);
+    fn process_stopped(&mut self, sig: Signal, rip: usize, print_backtrace: bool) {
+        println!(
+            "Child stopped (signal {}, rip = {:#x})",
+            sig.to_string(),
+            rip
+        );
+
+        let pid = self.inferior.as_ref().unwrap().pid();
+        let d = Debugger::new_debug_wrapper(&self.target, pid).unwrap();
+
+        if print_backtrace {
+            match d.debug_data.get_line_from_addr(rip) {
+                Some(line) => {
+                    println!("Stopped at {}:{}", line.file, line.number);
+                }
+                None => {
+                    println!("Failed to locate source at {:#x}", rip);
+                    return;
+                }
+            }
+        }
+
+        self.debug_data = Some(d);
     }
 
     fn process_exit(&mut self, exit_code: i32) {
@@ -127,7 +159,9 @@ impl Debugger {
     fn continue_process(&mut self) {
         match self.inferior.as_mut() {
             Some(inf) => match inf.cont() {
-                Ok(Status::Stopped(sig, pc)) => self.process_stopped(sig, pc),
+                Ok(Status::Stopped(sig, pc)) => {
+                    self.process_stopped(sig, pc, self.is_stopped_by_bk(pc))
+                }
                 Ok(Status::Exited(code)) => {
                     self.process_exit(code);
                 }
@@ -165,68 +199,63 @@ impl Debugger {
         }
     }
 
-    fn process_backtrace(&mut self) {
-        match self.inferior.as_mut() {
-            Some(inf) => match inf.print_backtrace() {
-                Ok(reg) => {
-                    if let None = self.debug_data {
-                        let target = &self.target;
-                        let debug_data = match DwarfData::from_file(target) {
-                            Ok(val) => val,
-                            Err(DwarfError::ErrorOpeningFile) => {
-                                println!("Could not open file {}", target);
-                                std::process::exit(1);
-                            }
-                            Err(DwarfError::DwarfFormatError(err)) => {
-                                println!(
-                                    "Could not load debugging symbols from {}: {:?}",
-                                    target, err
-                                );
-                                std::process::exit(1);
-                            }
-                        };
+    fn new_debug_wrapper(target: &str, pid: Pid) -> Result<DebugDataWrapper, nix::Error> {
+        let debug_data = match DwarfData::from_file(target) {
+            Ok(val) => val,
+            Err(DwarfError::ErrorOpeningFile) => {
+                println!("Could not open file {}", target);
+                std::process::exit(1);
+            }
+            Err(DwarfError::DwarfFormatError(err)) => {
+                println!(
+                    "Could not load debugging symbols from {}: {:?}",
+                    target, err
+                );
+                std::process::exit(1);
+            }
+        };
 
-                        let pid = inf.pid();
-                        self.debug_data = Some(DebugDataWrapper {
-                            debug_data,
-                            pid,
-                            reg,
-                        });
-                    }
-
-                    if let Some(w) = self.debug_data.as_ref() {
-                        let reg = ptrace::getregs(w.pid).unwrap();
-                        let mut rip = reg.rip;
-                        let mut rbp = reg.rbp;
-                        let mut stack_info: Vec<String> = Vec::with_capacity(64);
-
-                        loop {
-                            // get func name
-                            // get source name
-                            let (s, func_name) = Debugger::get_current_stack_info(w, rip as usize);
-                            stack_info.push(s);
-                            if func_name == "main" {
-                                break;
-                            }
-
-                            rip = Debugger::read_from_addr(w.pid, (rbp + 8) as ptrace::AddressType)
-                                as u64;
-                            rbp =
-                                Debugger::read_from_addr(w.pid, rbp as ptrace::AddressType) as u64;
-                        }
-
-                        if stack_info.len() > 0 {
-                            for row in stack_info {
-                                println!("{}", row);
-                            }
-                        }
-                    }
-                }
-                other => {
-                    println!("Unexpected rip value {:?}", other);
-                }
+        let reg_val = ptrace::getregs(pid)?;
+        Ok(DebugDataWrapper {
+            debug_data,
+            pid,
+            reg: RegisterValue {
+                rip: reg_val.rip as usize,
+                rsp: reg_val.rsp as usize,
+                rbp: reg_val.rbp as usize,
             },
-            None => self.process_no_inferior(),
+        })
+    }
+
+    fn process_backtrace(&mut self) {
+        if self.inferior.is_none() {
+            self.process_no_inferior();
+            return;
+        }
+
+        let w = self.debug_data.as_ref().unwrap();
+        let reg = ptrace::getregs(w.pid).unwrap();
+        let mut rip = reg.rip;
+        let mut rbp = reg.rbp;
+        let mut stack_info: Vec<String> = Vec::with_capacity(64);
+
+        loop {
+            // get func name
+            // get source name
+            let (s, func_name) = Debugger::get_current_stack_info(w, rip as usize);
+            stack_info.push(s);
+            if func_name == "main" {
+                break;
+            }
+
+            rip = Debugger::read_from_addr(w.pid, (rbp + 8) as ptrace::AddressType) as u64;
+            rbp = Debugger::read_from_addr(w.pid, rbp as ptrace::AddressType) as u64;
+        }
+
+        if stack_info.len() > 0 {
+            for row in stack_info {
+                println!("{}", row);
+            }
         }
     }
 
@@ -258,5 +287,29 @@ impl Debugger {
 
     fn read_from_addr(pid: Pid, addr: AddressType) -> usize {
         ptrace::read(pid, addr).unwrap() as usize
+    }
+
+    fn process_add_break(&mut self, bk: usize) {
+        match self.inferior.as_mut() {
+            None => {
+                // Before inferior running
+                self.bks.push(bk as usize);
+            }
+            Some(inf) => {
+                if let Err(err) = inf.add_breakpoint(bk) {
+                    println!("Add breakpoint {}, got {:?}", bk, err);
+                }
+            }
+        }
+        println!("Set breakpoint {} at {}", self.bks.len(), bk);
+    }
+
+    fn get_prev_rip(rip: usize) -> usize {
+        // The process is interrupted and %rip advanced.
+        return rip - 1;
+    }
+
+    fn is_stopped_by_bk(&self, rip: usize) -> bool {
+        self.bks.get(Debugger::get_prev_rip(rip)).is_some()
     }
 }
