@@ -42,7 +42,7 @@ const INS_INTERRUPT: u8 = 0xcc;
 
 pub struct Inferior {
     child: Child,
-    bks: HashMap<Breakpoint, u8>,
+    bkm: HashMap<Breakpoint, u8>,
 }
 
 impl Inferior {
@@ -61,7 +61,7 @@ impl Inferior {
             Ok(child) => {
                 let mut inf = Inferior {
                     child,
-                    bks: HashMap::with_capacity(bks.len()),
+                    bkm: HashMap::with_capacity(bks.len()),
                 };
 
                 for bk in bks {
@@ -104,13 +104,13 @@ impl Inferior {
         let mut reg = ptrace::getregs(pid).unwrap();
         let rip = reg.rip as usize;
         let prev_rip = Inferior::get_prev_rip(rip);
-        if self.bks.get(&prev_rip).is_none() {
+        if self.bkm.get(&prev_rip).is_none() {
             // stop by ctrl+c or elsec
             let _ = ptrace::cont(pid, None)?;
             return self.wait(None);
         }
 
-        let ins = self.bks.get(&prev_rip).unwrap().clone();
+        let ins = self.bkm.get(&prev_rip).unwrap().clone();
 
         // rewrite ins at %rip - 1
         let data = helper::write_byte(pid, prev_rip as u64, ins)?;
@@ -139,13 +139,17 @@ impl Inferior {
     // Bug: call break 0xAAA twice and then be trucked into infinite loops.
     pub fn add_breakpoint(&mut self, rip: usize) -> Result<(), nix::Error> {
         let ins: u8 = helper::write_byte(self.pid(), rip as u64, INS_INTERRUPT)?;
-        self.bks.insert(rip, ins);
+        self.bkm.insert(rip, ins);
 
-        for (k, v) in self.bks.iter() {
+        for (k, v) in self.bkm.iter() {
             println!("inferior breakpoint {:#x} = {:#x}", k, v);
         }
 
         Ok(())
+    }
+
+    pub fn is_stopped_by_bk(&self, prev_rip: usize) -> bool {
+        self.bkm.get(&prev_rip).is_some()
     }
 
     pub fn get_prev_rip(rip: usize) -> usize {

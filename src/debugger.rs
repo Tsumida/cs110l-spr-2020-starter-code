@@ -19,6 +19,8 @@ pub struct Debugger {
     readline: Editor<()>,
     inferior: Option<Inferior>,
     debug_data: Option<DebugDataWrapper>,
+
+    // Breakpoint buffer
     bks: Vec<Breakpoint>,
 }
 
@@ -308,7 +310,6 @@ impl Debugger {
     }
 
     fn is_stopped_by_bk(&self, prev_rip: usize) -> bool {
-        println!("{:#x}, {} {:?}", prev_rip, self.bks.len(), self.bks);
-        self.bks.get(prev_rip).is_some()
+        self.inferior.as_ref().unwrap().is_stopped_by_bk(prev_rip)
     }
 }
