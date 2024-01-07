@@ -139,15 +139,13 @@ impl Debugger {
         let pid = self.inferior.as_ref().unwrap().pid();
         let d = Debugger::new_debug_wrapper(&self.target, pid).unwrap();
 
-        if print_backtrace {
-            match d.debug_data.get_line_from_addr(Inferior::get_prev_rip(rip)) {
-                Some(line) => {
-                    println!("Stopped at {}:{}", line.file, line.number);
-                }
-                None => {
-                    println!("Failed to locate source at {:#x}", rip);
-                    return;
-                }
+        match d.debug_data.get_line_from_addr(Inferior::get_prev_rip(rip)) {
+            Some(line) => {
+                println!("Stopped at {}:{}", line.file, line.number);
+            }
+            None => {
+                println!("Failed to locate source at {:#x}", rip);
+                return;
             }
         }
 
